@@ -50,16 +50,16 @@ func NewAuthHandler(privkey string, pubkey string) func(http.Handler) http.Handl
 func (a *AuthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	headerToken := r.Header.Get("Authorization")
 	if headerToken == "" {
-		w.Header().Set("Content-Type", "application/vnd.api+json")
-		fmt.Fprintf(w, "{\"errors\":[{\"id\":\"unauthorized\",\"status\":401,\"title\":\"Unauthorized\",\"detail\":\"Access not authorized.\"}]}")
+		w.WriteHeader(http.StatusUnauthorized)
+		fmt.Fprintf(w, "{\"code\":\"401\",\"title\":\"Unauthorized\",\"detail\":\"Access not authorized.\"}]}")
 		return
 	}
 
 	token := strings.TrimPrefix(headerToken, "Bearer ")
 	claims, err := verifyToken(token)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/vnd.api+json")
-		fmt.Fprintf(w, "{\"errors\":[{\"id\":\"unauthorized\",\"status\":401,\"title\":\"Unauthorized\",\"detail\":\"Access not authorized.\"}]}")
+		w.WriteHeader(http.StatusUnauthorized)
+		fmt.Fprintf(w, "{\"code\":\"401\",\"title\":\"Unauthorized\",\"detail\":\"Access not authorized.\"}]}")
 		return
 	}
 
