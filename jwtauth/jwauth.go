@@ -18,16 +18,12 @@ import (
 	"github.com/gorilla/context"
 )
 
-var (
+type AuthHandler struct {
 	privateKey *rsa.PrivateKey
 	publicKey  *rsa.PublicKey
-)
-
-type AuthHandler struct {
-	next http.Handler
 }
 
-func NewAuthHandler(privkey string, pubkey string) func(http.Handler) http.Handler {
+func NewAuthHandler(privkey string, pubkey string) *AuthHandler {
 	priv, _ := ioutil.ReadFile(privkey)
 	parsedPriv, err := jwt.ParseRSAPrivateKeyFromPEM(priv)
 	if err != nil {
@@ -38,12 +34,9 @@ func NewAuthHandler(privkey string, pubkey string) func(http.Handler) http.Handl
 	if err != nil {
 		log.Fatal(err)
 	}
-	privateKey = parsedPriv
-	publicKey = parsedPub
-	return func(handler http.Handler) http.Handler {
-		return &AuthHandler{
-			next: handler,
-		}
+	return &AuthHandler{
+		privateKey: parsedPriv,
+		publicKey:  parsedPub,
 	}
 }
 
@@ -56,7 +49,7 @@ func (a *AuthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	token := strings.TrimPrefix(headerToken, "Bearer ")
-	claims, err := verifyToken(token)
+	claims, err := a.verifyToken(token)
 	if err != nil {
 		w.WriteHeader(http.StatusUnauthorized)
 		fmt.Fprintf(w, "{\"code\":\"401\",\"title\":\"Unauthorized\",\"detail\":\"Access not authorized.\"}]}")
@@ -64,34 +57,32 @@ func (a *AuthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	context.Set(r, "user", claims)
-
-	a.next.ServeHTTP(w, r)
 }
 
-func NewToken(claims map[string]string) (string, error) {
+func (a *AuthHandler) NewToken(claims map[string]string) (string, error) {
 	var err error
 	token := jwt.New(jwt.SigningMethodRS512)
 	for k, v := range claims {
-		if token.Claims[k], err = encryptClaim(v); err != nil {
+		if token.Claims[k], err = encryptClaim(v, a.publicKey); err != nil {
 			return "", err
 		}
 	}
-	if token.Claims["iat"], err = encryptClaim(strconv.FormatInt(time.Now().Unix(), 10)); err != nil {
+	if token.Claims["iat"], err = encryptClaim(strconv.FormatInt(time.Now().Unix(), 10), a.publicKey); err != nil {
 		return "", err
 	}
-	if token.Claims["exp"], err = encryptClaim(strconv.FormatInt(time.Now().Add(time.Hour*72).Unix(), 10)); err != nil {
+	if token.Claims["exp"], err = encryptClaim(strconv.FormatInt(time.Now().Add(time.Hour*72).Unix(), 10), a.publicKey); err != nil {
 		return "", err
 	}
-	tokenString, err := token.SignedString(privateKey)
+	tokenString, err := token.SignedString(a.privateKey)
 	if err != nil {
 		return "", err
 	}
 	return tokenString, nil
 }
 
-func verifyToken(token string) (map[string]string, error) {
+func (a *AuthHandler) verifyToken(token string) (map[string]string, error) {
 	recvToken, err := jwt.Parse(token, func(token *jwt.Token) (interface{}, error) {
-		return publicKey, nil
+		return a.publicKey, nil
 	})
 	if err != nil {
 		return nil, err
@@ -106,13 +97,13 @@ func verifyToken(token string) (map[string]string, error) {
 	claims := make(map[string]string)
 	for k, v := range recvToken.Claims {
 		if v != "iat" && v != "exp" {
-			if claims[k], err = decryptClaim(v.(string)); err != nil {
+			if claims[k], err = decryptClaim(v.(string), a.privateKey); err != nil {
 				return nil, err
 			}
 		}
 	}
 
-	c, err := decryptClaim(recvToken.Claims["iat"].(string))
+	c, err := decryptClaim(recvToken.Claims["iat"].(string), a.privateKey)
 	if err != nil {
 		return nil, err
 	}
@@ -121,7 +112,7 @@ func verifyToken(token string) (map[string]string, error) {
 		return nil, err
 	}
 	issuedAt := time.Unix(iat, 0)
-	c, err = decryptClaim(recvToken.Claims["exp"].(string))
+	c, err = decryptClaim(recvToken.Claims["exp"].(string), a.privateKey)
 	if err != nil {
 		return nil, err
 	}
@@ -138,7 +129,7 @@ func verifyToken(token string) (map[string]string, error) {
 	return claims, nil
 }
 
-func encryptClaim(claim string) (string, error) {
+func encryptClaim(claim string, publicKey *rsa.PublicKey) (string, error) {
 	label := []byte("authenticator")
 	rng := rand.Reader
 	ciphertext, err := rsa.EncryptOAEP(sha256.New(), rng, publicKey, []byte(claim), label)
@@ -148,7 +139,7 @@ func encryptClaim(claim string) (string, error) {
 	return base64.StdEncoding.EncodeToString(ciphertext), nil
 }
 
-func decryptClaim(claim string) (string, error) {
+func decryptClaim(claim string, privateKey *rsa.PrivateKey) (string, error) {
 	label := []byte("authenticator")
 	rng := rand.Reader
 	decoded, err := base64.StdEncoding.DecodeString(claim)
