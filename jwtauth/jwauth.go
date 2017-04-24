@@ -10,7 +10,6 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -21,6 +20,11 @@ import (
 type AuthHandler struct {
 	privateKey *rsa.PrivateKey
 	publicKey  *rsa.PublicKey
+}
+
+type AllClaims struct {
+	jwt.StandardClaims
+	CustomClaims map[string]string
 }
 
 func NewAuthHandler(privkey string, pubkey string) *AuthHandler {
@@ -59,20 +63,20 @@ func (a *AuthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	context.Set(r, "user", claims)
 }
 
-func (a *AuthHandler) NewToken(claims map[string]string) (string, error) {
+func (a *AuthHandler) NewToken(claims map[string]string, duration time.Duration) (string, error) {
 	var err error
-	token := jwt.New(jwt.SigningMethodRS512)
+
+	tokenClaims := &AllClaims{CustomClaims: claims}
 	for k, v := range claims {
-		if token.Claims[k], err = encryptClaim(v, a.publicKey); err != nil {
+		if tokenClaims.CustomClaims[k], err = encryptClaim(v, a.publicKey); err != nil {
 			return "", err
 		}
 	}
-	if token.Claims["iat"], err = encryptClaim(strconv.FormatInt(time.Now().Unix(), 10), a.publicKey); err != nil {
-		return "", err
-	}
-	if token.Claims["exp"], err = encryptClaim(strconv.FormatInt(time.Now().Add(time.Hour*72).Unix(), 10), a.publicKey); err != nil {
-		return "", err
-	}
+
+	tokenClaims.StandardClaims.IssuedAt = time.Now().Unix()
+	tokenClaims.StandardClaims.ExpiresAt = time.Now().Add(duration).Unix()
+
+	token := jwt.NewWithClaims(jwt.SigningMethodRS512, tokenClaims)
 	tokenString, err := token.SignedString(a.privateKey)
 	if err != nil {
 		return "", err
@@ -81,7 +85,7 @@ func (a *AuthHandler) NewToken(claims map[string]string) (string, error) {
 }
 
 func (a *AuthHandler) verifyToken(token string) (map[string]string, error) {
-	recvToken, err := jwt.Parse(token, func(token *jwt.Token) (interface{}, error) {
+	recvToken, err := jwt.ParseWithClaims(token, &AllClaims{}, func(token *jwt.Token) (interface{}, error) {
 		return a.publicKey, nil
 	})
 	if err != nil {
@@ -90,42 +94,28 @@ func (a *AuthHandler) verifyToken(token string) (map[string]string, error) {
 	if recvToken.Method != jwt.SigningMethodRS512 {
 		return nil, errors.New("Illegal Signing Method")
 	}
-	if recvToken.Claims["iat"] == nil || recvToken.Claims["exp"] == nil {
-		return nil, errors.New("Illegal token")
+
+	tokenClaims, ok := recvToken.Claims.(*AllClaims)
+	if !ok || !recvToken.Valid {
+		return nil, errors.New("Invalid token")
+
+	}
+
+	issuedAt := time.Unix(tokenClaims.StandardClaims.IssuedAt, 0)
+	expiration := time.Unix(tokenClaims.StandardClaims.ExpiresAt, 0)
+	currentTime := time.Now()
+
+	if issuedAt.After(currentTime) && expiration.Before(currentTime) {
+		return nil, errors.New("Token expired or not yet valid")
 	}
 
 	claims := make(map[string]string)
-	for k, v := range recvToken.Claims {
-		if v != "iat" && v != "exp" {
-			if claims[k], err = decryptClaim(v.(string), a.privateKey); err != nil {
-				return nil, err
-			}
+	for k, v := range tokenClaims.CustomClaims {
+		if claims[k], err = decryptClaim(v, a.privateKey); err != nil {
+			return nil, err
 		}
 	}
 
-	c, err := decryptClaim(recvToken.Claims["iat"].(string), a.privateKey)
-	if err != nil {
-		return nil, err
-	}
-	iat, err := strconv.ParseInt(c, 10, 64)
-	if err != nil {
-		return nil, err
-	}
-	issuedAt := time.Unix(iat, 0)
-	c, err = decryptClaim(recvToken.Claims["exp"].(string), a.privateKey)
-	if err != nil {
-		return nil, err
-	}
-	exp, err := strconv.ParseInt(c, 10, 64)
-	if err != nil {
-		return nil, err
-	}
-	expiration := time.Unix(exp, 0)
-	currentTime := time.Now()
-
-	if !recvToken.Valid || (issuedAt.After(currentTime) && expiration.Before(currentTime)) {
-		return nil, errors.New("Invalid token")
-	}
 	return claims, nil
 }
 
